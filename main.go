@@ -33,6 +33,7 @@ var (
 	serviceStyle     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12"))
 	nodeStyle        = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("13"))
 	taskRunningStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("10"))
+	taskReadyStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
 	taskFailedStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
 	taskOtherStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 	selectedStyle    = lipgloss.NewStyle().Background(lipgloss.Color("237"))
@@ -592,8 +593,13 @@ func truncateID(id string) string {
 }
 
 func truncateImage(image string) string {
+	// Remove @sha256:... digest
 	if idx := strings.Index(image, "@sha256:"); idx != -1 {
 		image = image[:idx]
+	}
+	// Strip registry path, keep only image name and tag
+	if idx := strings.LastIndex(image, "/"); idx != -1 {
+		image = image[idx+1:]
 	}
 	if len(image) > 40 {
 		return image[:37] + "..."
@@ -1114,6 +1120,8 @@ func (m Model) renderNode(node *TreeNode, depth int, isLast bool) string {
 	switch node.State {
 	case "running":
 		stateStyle = taskRunningStyle
+	case "ready":
+		stateStyle = taskReadyStyle
 	case "failed", "rejected":
 		stateStyle = taskFailedStyle
 	default:
