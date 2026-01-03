@@ -32,10 +32,11 @@ const (
 var (
 	serviceStyle     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12"))
 	nodeStyle        = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("13"))
-	taskRunningStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("10"))
-	taskReadyStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
-	taskFailedStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
-	taskOtherStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	taskRunningStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("10"))
+	taskReadyStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
+	taskStartingStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("11"))
+	taskFailedStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
+	taskOtherStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 	selectedStyle    = lipgloss.NewStyle().Background(lipgloss.Color("237"))
 	errorStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Italic(true)
 	dimStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
@@ -1122,6 +1123,8 @@ func (m Model) renderNode(node *TreeNode, depth int, isLast bool) string {
 		stateStyle = taskRunningStyle
 	case "ready":
 		stateStyle = taskReadyStyle
+	case "starting", "preparing", "assigned", "accepted", "pending":
+		stateStyle = taskStartingStyle
 	case "failed", "rejected":
 		stateStyle = taskFailedStyle
 	default:
