@@ -87,7 +87,8 @@ Shows all swarm nodes with their tasks grouped underneath:
 
 ## Screenshots
 
-<!-- Add screenshots here -->
+<img width="2182" height="1321" alt="image" src="https://github.com/user-attachments/assets/66c02d95-10e3-44c9-818f-f6eb860a71aa" />
+<img width="2180" height="1322" alt="image" src="https://github.com/user-attachments/assets/b03f3bf6-edd1-4e01-86d8-0514e2cb71fb" />
 
 ## Requirements
 
