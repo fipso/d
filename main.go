@@ -78,6 +78,10 @@ type Model struct {
 	logsOffset     int      // Scroll offset for logs
 	logsLoading    bool
 	lastSelectedID string // Track which task we're showing logs for
+
+	// Fullscreen logs mode
+	fullscreenLogs bool
+	logsLastKey    string // For vim-style gg in logs view
 }
 
 type flatNode struct {
@@ -164,6 +168,7 @@ KEYBINDINGS:
     k, ↑          Move cursor up
     gg            Jump to top
     G             Jump to bottom
+    Enter         Fullscreen logs (j/k:scroll gg/G:jump q/esc:exit)
     r             Refresh
     q, Ctrl+C     Quit
 
@@ -656,6 +661,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
+		// Handle fullscreen logs mode
+		if m.fullscreenLogs {
+			return m.handleFullscreenLogsKey(msg)
+		}
+
 		switch msg.String() {
 		case "q", "ctrl+c":
 			return m, tea.Quit
@@ -680,6 +690,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 
+		case "enter":
+			m.lastKey = ""
+			// Enter fullscreen logs mode
+			if len(m.logs) > 0 {
+				m.fullscreenLogs = true
+			}
+			return m, nil
 
 		case "g":
 			if m.lastKey == "g" {
@@ -711,6 +728,64 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
+	return m, nil
+}
+
+func (m Model) handleFullscreenLogsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	visibleLines := m.height - 3
+	if visibleLines < 1 {
+		visibleLines = 1
+	}
+
+	switch msg.String() {
+	case "q", "esc":
+		m.fullscreenLogs = false
+		m.logsLastKey = ""
+		return m, nil
+
+	case "ctrl+c":
+		return m, tea.Quit
+
+	case "up", "k":
+		m.logsLastKey = ""
+		if m.logsOffset > 0 {
+			m.logsOffset--
+		}
+		return m, nil
+
+	case "down", "j":
+		m.logsLastKey = ""
+		maxOffset := len(m.logs) - visibleLines
+		if maxOffset < 0 {
+			maxOffset = 0
+		}
+		if m.logsOffset < maxOffset {
+			m.logsOffset++
+		}
+		return m, nil
+
+	case "g":
+		if m.logsLastKey == "g" {
+			// gg - jump to top of logs
+			m.logsOffset = 0
+			m.logsLastKey = ""
+			return m, nil
+		}
+		m.logsLastKey = "g"
+		return m, nil
+
+	case "G":
+		// G - jump to bottom of logs
+		m.logsLastKey = ""
+		maxOffset := len(m.logs) - visibleLines
+		if maxOffset < 0 {
+			maxOffset = 0
+		}
+		m.logsOffset = maxOffset
+		return m, nil
+	}
+
+	m.logsLastKey = ""
 	return m, nil
 }
 
@@ -810,7 +885,7 @@ func (m Model) loadLogs(node *TreeNode) tea.Cmd {
 		opts := container.LogsOptions{
 			ShowStdout: true,
 			ShowStderr: true,
-			Tail:       "500",
+			Tail:       "10000",
 		}
 
 		var reader io.ReadCloser
@@ -875,6 +950,11 @@ func (m Model) View() string {
 		return "No data found.\n\nPress 'q' to quit, 'r' to refresh.\n"
 	}
 
+	// Fullscreen logs view
+	if m.fullscreenLogs {
+		return m.renderFullscreenLogs()
+	}
+
 	// Calculate panel widths
 	leftWidth := m.width / 2
 	rightWidth := m.width - leftWidth - 1 // -1 for separator
@@ -903,7 +983,7 @@ func (m Model) View() string {
 		scrollInfo = fmt.Sprintf(" [%d/%d]", m.cursor+1, len(m.flatList))
 	}
 	leftLines = append(leftLines, dimStyle.Render(title+scrollInfo))
-	leftLines = append(leftLines, dimStyle.Render("j/k:nav gg/G:jump r:refresh q:quit"))
+	leftLines = append(leftLines, dimStyle.Render("j/k:nav gg/G:jump enter:logs r:refresh q:quit"))
 
 	start := m.offset
 	if start < 0 {
@@ -984,6 +1064,57 @@ func (m Model) View() string {
 		output.WriteString(leftLine)
 		output.WriteString(dimStyle.Render(separator))
 		output.WriteString(rightLine)
+		if i < numLines-1 {
+			output.WriteString("\n")
+		}
+	}
+
+	return output.String()
+}
+
+func (m Model) renderFullscreenLogs() string {
+	visibleLines := m.height - 3
+	if visibleLines < 1 {
+		visibleLines = 1
+	}
+
+	var lines []string
+
+	// Header with selected item name
+	selectedName := ""
+	if m.cursor < len(m.flatList) {
+		selectedName = m.flatList[m.cursor].node.Name
+	}
+	scrollInfo := fmt.Sprintf(" [%d/%d]", m.logsOffset+1, len(m.logs))
+	lines = append(lines, dimStyle.Render("Logs: "+selectedName+scrollInfo))
+	lines = append(lines, dimStyle.Render("j/k:scroll gg/G:jump q/esc:exit"))
+
+	// Log content
+	logsStart := m.logsOffset
+	if logsStart < 0 {
+		logsStart = 0
+	}
+	logsEnd := logsStart + visibleLines
+	if logsEnd > len(m.logs) {
+		logsEnd = len(m.logs)
+	}
+	for i := logsStart; i < logsEnd; i++ {
+		line := sanitizeLine(m.logs[i])
+		line = truncateLine(line, m.width-1)
+		lines = append(lines, line)
+	}
+
+	// Build output
+	var output strings.Builder
+	numLines := m.height
+	if numLines > 0 {
+		numLines--
+	}
+
+	for i := 0; i < numLines; i++ {
+		if i < len(lines) {
+			output.WriteString(lines[i])
+		}
 		if i < numLines-1 {
 			output.WriteString("\n")
 		}
