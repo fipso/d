@@ -84,6 +84,9 @@ type Model struct {
 	logsLastKey    string // For vim-style gg in logs view
 }
 
+// Global socket override (set via -s/--socket flag)
+var socketOverride string
+
 type flatNode struct {
 	node   *TreeNode
 	depth  int
@@ -118,25 +121,50 @@ type contextEndpoint struct {
 }
 
 func main() {
-	// Parse subcommand
+	// Parse arguments
 	args := os.Args[1:]
 	viewMode := ViewByService
+	var remainingArgs []string
 
-	// Check for help flag
-	for _, arg := range args {
+	// Parse flags
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+
 		if arg == "-h" || arg == "--help" || arg == "help" {
 			printHelp()
 			return
 		}
+
+		if arg == "-s" || arg == "--socket" {
+			if i+1 >= len(args) {
+				fmt.Fprintf(os.Stderr, "Error: %s requires a socket path argument\n", arg)
+				os.Exit(1)
+			}
+			socketOverride = args[i+1]
+			i++ // Skip next arg (the socket path)
+			continue
+		}
+
+		// Handle -s=value or --socket=value
+		if strings.HasPrefix(arg, "-s=") {
+			socketOverride = strings.TrimPrefix(arg, "-s=")
+			continue
+		}
+		if strings.HasPrefix(arg, "--socket=") {
+			socketOverride = strings.TrimPrefix(arg, "--socket=")
+			continue
+		}
+
+		remainingArgs = append(remainingArgs, arg)
 	}
 
 	// Check for subcommand
-	if len(args) > 0 {
-		switch args[0] {
+	if len(remainingArgs) > 0 {
+		switch remainingArgs[0] {
 		case "nodes":
 			viewMode = ViewByNode
 		default:
-			fmt.Fprintf(os.Stderr, "Unknown command: %s\n", args[0])
+			fmt.Fprintf(os.Stderr, "Unknown command: %s\n", remainingArgs[0])
 			printHelp()
 			os.Exit(1)
 		}
@@ -154,14 +182,15 @@ func printHelp() {
 	fmt.Println(`d - Docker Swarm service viewer
 
 USAGE:
-    d [COMMAND] [OPTIONS]
+    d [OPTIONS] [COMMAND]
 
 COMMANDS:
     (none)        Show services with their tasks (default)
     nodes         Show nodes with their tasks
 
 OPTIONS:
-    -h, --help    Show this help message
+    -s, --socket PATH    Override Docker socket path (e.g. /var/run/docker.sock)
+    -h, --help           Show this help message
 
 KEYBINDINGS:
     j, ↓          Move cursor down
@@ -209,6 +238,11 @@ func (m Model) loadData() tea.Cmd {
 
 // getDockerHost resolves the Docker host from context configuration
 func getDockerHost() (string, error) {
+	// Socket override from -s/--socket flag takes highest priority
+	if socketOverride != "" {
+		return "unix://" + socketOverride, nil
+	}
+
 	if host := os.Getenv("DOCKER_HOST"); host != "" {
 		return host, nil
 	}
