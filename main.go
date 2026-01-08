@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -223,6 +224,7 @@ KEYBINDINGS:
     k, ↑          Move cursor up
     gg            Jump to top
     G             Jump to bottom
+    yy            Copy all logs to clipboard (wl-copy)
     Enter         Fullscreen logs (j/k:scroll gg/G:jump q/esc:exit)
     n             Toggle between services/nodes view
     a             Toggle auto-refresh (data:2s, logs:1s, fullscreen logs:500ms)
@@ -272,6 +274,12 @@ func tickCmd() tea.Cmd {
 	return tea.Tick(tickInterval, func(t time.Time) tea.Msg {
 		return tickMsg(t)
 	})
+}
+
+func copyToClipboard(text string) {
+	cmd := exec.Command("wl-copy")
+	cmd.Stdin = strings.NewReader(text)
+	_ = cmd.Run()
 }
 
 // getDockerHost resolves the Docker host from context configuration
@@ -892,6 +900,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.lastSelectedID = ""
 			m.logs = nil
 			return m, m.loadData()
+
+		case "y":
+			if m.lastKey == "y" {
+				// yy - copy all logs to clipboard
+				m.lastKey = ""
+				if len(m.logs) > 0 {
+					copyToClipboard(strings.Join(m.logs, "\n"))
+				}
+				return m, nil
+			}
+			m.lastKey = "y"
+			return m, nil
 		}
 	}
 
@@ -959,6 +979,18 @@ func (m Model) handleFullscreenLogsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.lastLogTime = time.Now()
 			return m, tickCmd()
 		}
+		return m, nil
+
+	case "y":
+		if m.logsLastKey == "y" {
+			// yy - copy all logs to clipboard
+			m.logsLastKey = ""
+			if len(m.logs) > 0 {
+				copyToClipboard(strings.Join(m.logs, "\n"))
+			}
+			return m, nil
+		}
+		m.logsLastKey = "y"
 		return m, nil
 	}
 
@@ -1257,7 +1289,7 @@ func (m Model) View() string {
 		autoRefreshIndicator = " [AUTO]"
 	}
 	leftLines = append(leftLines, dimStyle.Render(title+scrollInfo+autoRefreshIndicator))
-	leftLines = append(leftLines, dimStyle.Render("j/k:nav gg/G:jump enter:logs n:nodes a:auto r:refresh q:quit"))
+	leftLines = append(leftLines, dimStyle.Render("j/k:nav gg/G:jump yy:copy enter:logs n:mode a:auto r:refresh q:quit"))
 
 	start := m.offset
 	if start < 0 {
@@ -1365,7 +1397,7 @@ func (m Model) renderFullscreenLogs() string {
 		autoIndicator = " [AUTO]"
 	}
 	lines = append(lines, dimStyle.Render("Logs: "+selectedName+scrollInfo+autoIndicator))
-	lines = append(lines, dimStyle.Render("j/k:scroll gg/G:jump a:auto q/esc:exit"))
+	lines = append(lines, dimStyle.Render("j/k:scroll gg/G:jump yy:copy a:auto q/esc:exit"))
 
 	// Log content
 	logsStart := m.logsOffset
