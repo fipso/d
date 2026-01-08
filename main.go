@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -82,6 +83,11 @@ type Model struct {
 	// Fullscreen logs mode
 	fullscreenLogs bool
 	logsLastKey    string // For vim-style gg in logs view
+
+	// Auto-refresh
+	autoRefresh     bool
+	lastLogTime     time.Time // Track last log timestamp for incremental fetching
+	lastDataRefresh time.Time // Track last data refresh
 }
 
 // Global socket override (set via -s/--socket flag)
@@ -99,11 +105,31 @@ type dataLoadedMsg struct {
 	err   error
 }
 
+type dataLoadedSilentMsg struct {
+	nodes []*TreeNode
+	err   error
+}
+
 type logsLoadedMsg struct {
 	taskID string
 	lines  []string
 	err    error
 }
+
+type logsAppendedMsg struct {
+	taskID string
+	lines  []string
+	err    error
+}
+
+type tickMsg time.Time
+
+const (
+	tickInterval              = 500 * time.Millisecond
+	fullscreenLogRefreshDelay = 500 * time.Millisecond
+	normalLogRefreshDelay     = 1 * time.Second
+	dataRefreshInterval       = 2 * time.Second
+)
 
 // Docker config structures
 type dockerConfig struct {
@@ -198,6 +224,8 @@ KEYBINDINGS:
     gg            Jump to top
     G             Jump to bottom
     Enter         Fullscreen logs (j/k:scroll gg/G:jump q/esc:exit)
+    n             Toggle between services/nodes view
+    a             Toggle auto-refresh (data:2s, logs:1s, fullscreen logs:500ms)
     r             Refresh
     q, Ctrl+C     Quit
 
@@ -214,12 +242,16 @@ DESCRIPTION:
 
 func initialModel(viewMode ViewMode) Model {
 	return Model{
-		loading:  true,
-		viewMode: viewMode,
+		loading:     true,
+		viewMode:    viewMode,
+		autoRefresh: true,
 	}
 }
 
 func (m Model) Init() tea.Cmd {
+	if m.autoRefresh {
+		return tea.Batch(m.loadData(), tickCmd())
+	}
 	return m.loadData()
 }
 
@@ -234,6 +266,12 @@ func (m Model) loadData() tea.Cmd {
 		}
 		return dataLoadedMsg{nodes: nodes, err: err}
 	}
+}
+
+func tickCmd() tea.Cmd {
+	return tea.Tick(tickInterval, func(t time.Time) tea.Msg {
+		return tickMsg(t)
+	})
 }
 
 // getDockerHost resolves the Docker host from context configuration
@@ -677,6 +715,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmd := m.maybeLoadLogs()
 		return m, cmd
 
+	case dataLoadedSilentMsg:
+		// Silent refresh - update data but preserve cursor position
+		if msg.err == nil {
+			oldSelectedID := m.lastSelectedID
+			oldCursor := m.cursor
+			m.nodes = msg.nodes
+			m.buildFlatList()
+			// Try to preserve cursor position
+			if oldCursor < len(m.flatList) {
+				m.cursor = oldCursor
+			} else if len(m.flatList) > 0 {
+				m.cursor = len(m.flatList) - 1
+			}
+			m.fixOffset()
+			// Preserve lastSelectedID so we don't trigger a log reload
+			m.lastSelectedID = oldSelectedID
+		}
+		return m, nil
+
 	case logsLoadedMsg:
 		// Only update if this is for the currently selected task
 		if msg.taskID == m.lastSelectedID {
@@ -686,6 +743,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				m.logs = msg.lines
 			}
+			m.lastLogTime = time.Now()
 			// Start at the bottom of logs (most recent)
 			m.logsOffset = len(m.logs) - (m.height - 3)
 			if m.logsOffset < 0 {
@@ -693,6 +751,58 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, nil
+
+	case logsAppendedMsg:
+		// Append new logs if this is for the currently selected task
+		if msg.taskID == m.lastSelectedID {
+			if msg.err == nil && len(msg.lines) > 0 {
+				// Check if we were at the bottom before appending
+				visibleLines := m.height - 3
+				if visibleLines < 1 {
+					visibleLines = 1
+				}
+				wasAtBottom := m.logsOffset >= len(m.logs)-visibleLines
+
+				m.logs = append(m.logs, msg.lines...)
+				m.lastLogTime = time.Now()
+
+				// Auto-scroll to bottom if we were already there
+				if wasAtBottom {
+					m.logsOffset = len(m.logs) - visibleLines
+					if m.logsOffset < 0 {
+						m.logsOffset = 0
+					}
+				}
+			}
+		}
+		return m, nil
+
+	case tickMsg:
+		if !m.autoRefresh {
+			return m, nil
+		}
+
+		var cmds []tea.Cmd
+		cmds = append(cmds, tickCmd()) // Schedule next tick
+
+		now := time.Now()
+
+		// Refresh data periodically
+		if now.Sub(m.lastDataRefresh) >= dataRefreshInterval {
+			m.lastDataRefresh = now
+			cmds = append(cmds, m.loadDataSilent())
+		}
+
+		// Refresh logs incrementally with different delays for fullscreen vs normal
+		logDelay := normalLogRefreshDelay
+		if m.fullscreenLogs {
+			logDelay = fullscreenLogRefreshDelay
+		}
+		if m.lastSelectedID != "" && !m.logsLoading && now.Sub(m.lastLogTime) >= logDelay {
+			cmds = append(cmds, m.loadLogsIncremental())
+		}
+
+		return m, tea.Batch(cmds...)
 
 	case tea.KeyMsg:
 		// Handle fullscreen logs mode
@@ -759,6 +869,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.lastKey = ""
 			m.loading = true
 			return m, m.loadData()
+
+		case "a":
+			m.lastKey = ""
+			m.autoRefresh = !m.autoRefresh
+			if m.autoRefresh {
+				m.lastDataRefresh = time.Now()
+				m.lastLogTime = time.Now()
+				return m, tickCmd()
+			}
+			return m, nil
+
+		case "n":
+			m.lastKey = ""
+			// Toggle between service and node view
+			if m.viewMode == ViewByService {
+				m.viewMode = ViewByNode
+			} else {
+				m.viewMode = ViewByService
+			}
+			m.loading = true
+			m.lastSelectedID = ""
+			m.logs = nil
+			return m, m.loadData()
 		}
 	}
 
@@ -816,6 +949,16 @@ func (m Model) handleFullscreenLogsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			maxOffset = 0
 		}
 		m.logsOffset = maxOffset
+		return m, nil
+
+	case "a":
+		m.logsLastKey = ""
+		m.autoRefresh = !m.autoRefresh
+		if m.autoRefresh {
+			m.lastDataRefresh = time.Now()
+			m.lastLogTime = time.Now()
+			return m, tickCmd()
+		}
 		return m, nil
 	}
 
@@ -971,6 +1114,99 @@ func (m Model) loadLogs(node *TreeNode) tea.Cmd {
 	}
 }
 
+// loadDataSilent refreshes data without showing loading state
+func (m Model) loadDataSilent() tea.Cmd {
+	return func() tea.Msg {
+		var nodes []*TreeNode
+		var err error
+		if m.viewMode == ViewByNode {
+			nodes, err = fetchByNode()
+		} else {
+			nodes, err = fetchByService()
+		}
+		return dataLoadedSilentMsg{nodes: nodes, err: err}
+	}
+}
+
+// loadLogsIncremental fetches only new logs since last fetch
+func (m Model) loadLogsIncremental() tea.Cmd {
+	if m.cursor >= len(m.flatList) {
+		return nil
+	}
+	node := m.flatList[m.cursor].node
+
+	// In nodes view, parent nodes are swarm nodes (no logs)
+	if node.IsParent && m.viewMode == ViewByNode {
+		return nil
+	}
+
+	nodeID := node.Name
+	if !node.IsParent && node.TaskID != "" {
+		nodeID = node.TaskID
+	}
+
+	isTask := !node.IsParent && node.TaskID != ""
+	taskID := node.TaskID
+	serviceName := node.Name
+	since := m.lastLogTime
+
+	return func() tea.Msg {
+		ctx := context.Background()
+
+		cli, err := newDockerClient()
+		if err != nil {
+			return logsAppendedMsg{taskID: nodeID, err: err}
+		}
+		defer cli.Close()
+
+		opts := container.LogsOptions{
+			ShowStdout: true,
+			ShowStderr: true,
+			Since:      since.Format(time.RFC3339Nano),
+		}
+
+		var reader io.ReadCloser
+		if isTask {
+			reader, err = cli.TaskLogs(ctx, taskID, opts)
+		} else {
+			reader, err = cli.ServiceLogs(ctx, serviceName, opts)
+		}
+		if err != nil {
+			return logsAppendedMsg{taskID: nodeID, err: err}
+		}
+		defer reader.Close()
+
+		data, err := io.ReadAll(reader)
+		if err != nil {
+			return logsAppendedMsg{taskID: nodeID, err: err}
+		}
+
+		if len(data) == 0 {
+			return logsAppendedMsg{taskID: nodeID, lines: nil}
+		}
+
+		var combined strings.Builder
+		_, copyErr := stdcopy.StdCopy(&combined, &combined, strings.NewReader(string(data)))
+
+		var rawLines []string
+		if copyErr != nil {
+			rawLines = strings.Split(string(data), "\n")
+		} else {
+			rawLines = strings.Split(combined.String(), "\n")
+		}
+
+		// Filter empty lines
+		var lines []string
+		for _, line := range rawLines {
+			if strings.TrimSpace(line) != "" {
+				lines = append(lines, line)
+			}
+		}
+
+		return logsAppendedMsg{taskID: nodeID, lines: lines}
+	}
+}
+
 func (m Model) View() string {
 	if m.loading {
 		return "Loading...\n"
@@ -1016,8 +1252,12 @@ func (m Model) View() string {
 	if len(m.flatList) > 0 {
 		scrollInfo = fmt.Sprintf(" [%d/%d]", m.cursor+1, len(m.flatList))
 	}
-	leftLines = append(leftLines, dimStyle.Render(title+scrollInfo))
-	leftLines = append(leftLines, dimStyle.Render("j/k:nav gg/G:jump enter:logs r:refresh q:quit"))
+	autoRefreshIndicator := ""
+	if m.autoRefresh {
+		autoRefreshIndicator = " [AUTO]"
+	}
+	leftLines = append(leftLines, dimStyle.Render(title+scrollInfo+autoRefreshIndicator))
+	leftLines = append(leftLines, dimStyle.Render("j/k:nav gg/G:jump enter:logs n:nodes a:auto r:refresh q:quit"))
 
 	start := m.offset
 	if start < 0 {
@@ -1120,8 +1360,12 @@ func (m Model) renderFullscreenLogs() string {
 		selectedName = m.flatList[m.cursor].node.Name
 	}
 	scrollInfo := fmt.Sprintf(" [%d/%d]", m.logsOffset+1, len(m.logs))
-	lines = append(lines, dimStyle.Render("Logs: "+selectedName+scrollInfo))
-	lines = append(lines, dimStyle.Render("j/k:scroll gg/G:jump q/esc:exit"))
+	autoIndicator := ""
+	if m.autoRefresh {
+		autoIndicator = " [AUTO]"
+	}
+	lines = append(lines, dimStyle.Render("Logs: "+selectedName+scrollInfo+autoIndicator))
+	lines = append(lines, dimStyle.Render("j/k:scroll gg/G:jump a:auto q/esc:exit"))
 
 	// Log content
 	logsStart := m.logsOffset
