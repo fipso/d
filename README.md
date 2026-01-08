@@ -10,7 +10,9 @@ Instead of running multiple commands to check your swarm status, `d` gives you a
 - **Two view modes**:
   - **Service view** (default): Groups tasks by service
   - **Node view**: Groups tasks by swarm node
+- **Auto-refresh**: Automatically updates data and logs (data: 2s, logs: 1s, fullscreen: 500ms)
 - **Real-time logs**: Logs update automatically when selecting a task or service
+- **Fullscreen logs**: Press Enter to view logs in fullscreen mode
 - **Task-specific logs**: Select a task to see only its logs, select a service to see combined logs
 - **Smart task display**: Shows only current/relevant tasks (running or latest failed)
 - **Global service support**: Properly handles both replicated and global services
@@ -39,6 +41,9 @@ d
 # View by nodes
 d nodes
 
+# Use a specific Docker socket
+d --socket /var/run/docker.sock
+
 # Show help
 d --help
 ```
@@ -51,8 +56,22 @@ d --help
 | `k` / `↑` | Move cursor up |
 | `gg` | Jump to top |
 | `G` | Jump to bottom |
-| `r` | Refresh |
+| `Enter` | Fullscreen logs mode |
+| `yy` | Copy all logs to clipboard (wl-copy) |
+| `n` | Toggle between services/nodes view |
+| `a` | Toggle auto-refresh |
+| `r` | Manual refresh |
 | `q` / `Ctrl+C` | Quit |
+
+### Fullscreen Logs Mode
+
+| Key | Action |
+|-----|--------|
+| `j` / `k` | Scroll logs |
+| `gg` / `G` | Jump to top/bottom |
+| `yy` | Copy all logs to clipboard |
+| `a` | Toggle auto-refresh |
+| `q` / `Esc` | Exit fullscreen |
 
 ## Views
 
@@ -95,6 +114,7 @@ Shows all swarm nodes with their tasks grouped underneath:
 - Go 1.21+
 - Docker with Swarm mode enabled
 - Access to a Docker Swarm manager node
+- `wl-copy` for clipboard support (Wayland)
 
 ## License
 
