@@ -1003,6 +1003,9 @@ func (m *Model) maybeLoadLogs() tea.Cmd {
 		return nil
 	}
 	node := m.flatList[m.cursor].node
+	if node == nil {
+		return nil
+	}
 
 	// In nodes view, parent nodes are swarm nodes (no logs)
 	// In service view, parent nodes are services (have logs)
@@ -1072,6 +1075,9 @@ func (m *Model) itemHeight(index int) int {
 
 
 func (m Model) loadLogs(node *TreeNode) tea.Cmd {
+	if node == nil {
+		return nil
+	}
 	// ID used to match response with current selection
 	nodeID := node.Name
 	if !node.IsParent && node.TaskID != "" {
@@ -1166,6 +1172,9 @@ func (m Model) loadLogsIncremental() tea.Cmd {
 		return nil
 	}
 	node := m.flatList[m.cursor].node
+	if node == nil {
+		return nil
+	}
 
 	// In nodes view, parent nodes are swarm nodes (no logs)
 	if node.IsParent && m.viewMode == ViewByNode {
@@ -1301,6 +1310,9 @@ func (m Model) View() string {
 	renderedLines := 0
 	for i := start; i < len(m.flatList) && renderedLines < visibleLines; i++ {
 		flat := m.flatList[i]
+		if flat.node == nil {
+			continue
+		}
 		line := m.renderNode(flat.node, flat.depth, flat.isLast)
 		// Split on newlines (error messages add extra lines)
 		parts := strings.Split(line, "\n")
@@ -1388,7 +1400,7 @@ func (m Model) renderFullscreenLogs() string {
 
 	// Header with selected item name
 	selectedName := ""
-	if m.cursor < len(m.flatList) {
+	if m.cursor < len(m.flatList) && m.flatList[m.cursor].node != nil {
 		selectedName = m.flatList[m.cursor].node.Name
 	}
 	scrollInfo := fmt.Sprintf(" [%d/%d]", m.logsOffset+1, len(m.logs))
