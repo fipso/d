@@ -73,6 +73,8 @@ d --help
 | `a` | Toggle auto-refresh |
 | `q` / `Esc` | Exit fullscreen |
 
+Fullscreen mode displays Docker timestamps with seconds and milliseconds (`HH:MM:SS.mmm`) for precise log timing.
+
 ## Views
 
 ### Service View (default)

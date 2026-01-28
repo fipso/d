@@ -1100,6 +1100,7 @@ func (m Model) loadLogs(node *TreeNode) tea.Cmd {
 		opts := container.LogsOptions{
 			ShowStdout: true,
 			ShowStderr: true,
+			Timestamps: true,
 			Tail:       "10000",
 		}
 
@@ -1203,6 +1204,7 @@ func (m Model) loadLogsIncremental() tea.Cmd {
 		opts := container.LogsOptions{
 			ShowStdout: true,
 			ShowStderr: true,
+			Timestamps: true,
 			Since:      since.Format(time.RFC3339Nano),
 		}
 
@@ -1351,6 +1353,7 @@ func (m Model) View() string {
 	}
 	for i := logsStart; i < logsEnd; i++ {
 		line := sanitizeLine(m.logs[i])
+		line = stripDockerTimestamp(line)
 		rightLines = append(rightLines, line)
 	}
 
@@ -1422,6 +1425,7 @@ func (m Model) renderFullscreenLogs() string {
 	}
 	for i := logsStart; i < logsEnd; i++ {
 		line := sanitizeLine(m.logs[i])
+		line = formatLogTimestamp(line)
 		line = truncateLine(line, m.width-1)
 		lines = append(lines, line)
 	}
@@ -1536,6 +1540,54 @@ func sanitizeLine(s string) string {
 		}
 	}
 	return result.String()
+}
+
+// stripDockerTimestamp removes the Docker timestamp prefix from a log line
+func stripDockerTimestamp(line string) string {
+	if len(line) < 30 {
+		return line
+	}
+
+	// Find the space after the timestamp
+	spaceIdx := strings.Index(line, " ")
+	if spaceIdx < 20 || spaceIdx > 35 {
+		return line
+	}
+
+	// Verify it looks like a timestamp
+	_, err := time.Parse(time.RFC3339Nano, line[:spaceIdx])
+	if err != nil {
+		return line
+	}
+
+	return line[spaceIdx+1:]
+}
+
+// formatLogTimestamp reformats Docker log timestamps (RFC3339Nano) to HH:MM:SS.mmm format
+func formatLogTimestamp(line string) string {
+	// Docker timestamps are at the start: 2024-01-28T15:04:05.123456789Z message
+	if len(line) < 30 {
+		return line
+	}
+
+	// Find the space after the timestamp
+	spaceIdx := strings.Index(line, " ")
+	if spaceIdx < 20 || spaceIdx > 35 {
+		return line
+	}
+
+	timestampStr := line[:spaceIdx]
+	rest := line[spaceIdx+1:]
+
+	// Parse the timestamp
+	t, err := time.Parse(time.RFC3339Nano, timestampStr)
+	if err != nil {
+		return line
+	}
+
+	// Format as HH:MM:SS.mmm
+	formatted := t.Format("15:04:05.000")
+	return dimStyle.Render(formatted) + " " + rest
 }
 
 func (m Model) renderNode(node *TreeNode, depth int, isLast bool) string {
