@@ -85,6 +85,9 @@ type Model struct {
 	fullscreenLogs bool
 	logsLastKey    string // For vim-style gg in logs view
 
+	// Line wrapping in logs panel
+	lineWrap bool
+
 	// Auto-refresh
 	autoRefresh     bool
 	lastLogTime     time.Time // Track last log timestamp for incremental fetching
@@ -901,6 +904,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.logs = nil
 			return m, m.loadData()
 
+		case "W":
+			m.lastKey = ""
+			m.lineWrap = !m.lineWrap
+			return m, nil
+
 		case "y":
 			if m.lastKey == "y" {
 				// yy - copy all logs to clipboard
@@ -979,6 +987,11 @@ func (m Model) handleFullscreenLogsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.lastLogTime = time.Now()
 			return m, tickCmd()
 		}
+		return m, nil
+
+	case "W":
+		m.logsLastKey = ""
+		m.lineWrap = !m.lineWrap
 		return m, nil
 
 	case "y":
@@ -1087,6 +1100,7 @@ func (m Model) loadLogs(node *TreeNode) tea.Cmd {
 	isTask := !node.IsParent && node.TaskID != ""
 	taskID := node.TaskID
 	serviceName := node.Name // for parents, Name is the service name
+	nodeError := node.Error
 
 	return func() tea.Msg {
 		ctx := context.Background()
@@ -1113,6 +1127,14 @@ func (m Model) loadLogs(node *TreeNode) tea.Cmd {
 			reader, err = cli.ServiceLogs(ctx, serviceName, opts)
 		}
 		if err != nil {
+			if nodeError != "" {
+				parts := strings.Split(nodeError, ": ")
+				errLines := []string{"Error:"}
+				for _, part := range parts {
+					errLines = append(errLines, "  "+part)
+				}
+				return logsLoadedMsg{taskID: nodeID, lines: errLines}
+			}
 			return logsLoadedMsg{taskID: nodeID, err: err}
 		}
 		defer reader.Close()
@@ -1120,6 +1142,14 @@ func (m Model) loadLogs(node *TreeNode) tea.Cmd {
 		// Read all data first
 		data, err := io.ReadAll(reader)
 		if err != nil {
+			if nodeError != "" {
+				parts := strings.Split(nodeError, ": ")
+				errLines := []string{"Error:"}
+				for _, part := range parts {
+					errLines = append(errLines, "  "+part)
+				}
+				return logsLoadedMsg{taskID: nodeID, lines: errLines}
+			}
 			return logsLoadedMsg{taskID: nodeID, err: err}
 		}
 
@@ -1147,6 +1177,16 @@ func (m Model) loadLogs(node *TreeNode) tea.Cmd {
 		}
 		if len(lines) == 0 {
 			lines = []string{"(no logs)"}
+		}
+		if nodeError != "" {
+			// Split chained error on ": " so it doesn't get truncated
+			parts := strings.Split(nodeError, ": ")
+			errLines := []string{"Error:"}
+			for _, part := range parts {
+				errLines = append(errLines, "  "+part)
+			}
+			errLines = append(errLines, "")
+			lines = append(errLines, lines...)
 		}
 
 		return logsLoadedMsg{taskID: nodeID, lines: lines}
@@ -1300,7 +1340,7 @@ func (m Model) View() string {
 		autoRefreshIndicator = " [AUTO]"
 	}
 	leftLines = append(leftLines, dimStyle.Render(title+scrollInfo+autoRefreshIndicator))
-	leftLines = append(leftLines, dimStyle.Render("j/k:nav gg/G:jump yy:copy enter:logs n:mode a:auto r:refresh q:quit"))
+	leftLines = append(leftLines, dimStyle.Render("j/k:nav gg/G:jump yy:copy enter:logs n:mode a:auto W:wrap r:refresh q:quit"))
 
 	start := m.offset
 	if start < 0 {
@@ -1354,7 +1394,12 @@ func (m Model) View() string {
 	for i := logsStart; i < logsEnd; i++ {
 		line := sanitizeLine(m.logs[i])
 		line = stripDockerTimestamp(line)
-		rightLines = append(rightLines, line)
+		if m.lineWrap {
+			wrapped := wrapLine(line, rightWidth)
+			rightLines = append(rightLines, wrapped...)
+		} else {
+			rightLines = append(rightLines, line)
+		}
 	}
 
 	// Combine panels
@@ -1412,7 +1457,7 @@ func (m Model) renderFullscreenLogs() string {
 		autoIndicator = " [AUTO]"
 	}
 	lines = append(lines, dimStyle.Render("Logs: "+selectedName+scrollInfo+autoIndicator))
-	lines = append(lines, dimStyle.Render("j/k:scroll gg/G:jump yy:copy a:auto q/esc:exit"))
+	lines = append(lines, dimStyle.Render("j/k:scroll gg/G:jump yy:copy a:auto W:wrap q/esc:exit"))
 
 	// Log content
 	logsStart := m.logsOffset
@@ -1426,8 +1471,13 @@ func (m Model) renderFullscreenLogs() string {
 	for i := logsStart; i < logsEnd; i++ {
 		line := sanitizeLine(m.logs[i])
 		line = formatLogTimestamp(line)
-		line = truncateLine(line, m.width-1)
-		lines = append(lines, line)
+		if m.lineWrap {
+			wrapped := wrapLine(line, m.width-1)
+			lines = append(lines, wrapped...)
+		} else {
+			line = truncateLine(line, m.width-1)
+			lines = append(lines, line)
+		}
 	}
 
 	// Build output
@@ -1457,6 +1507,47 @@ func truncateOrPad(s string, width int) string {
 	}
 	// Reset formatting, then pad, to prevent color bleed
 	return s + "\x1b[0m" + strings.Repeat(" ", width-visLen)
+}
+
+func wrapLine(s string, width int) []string {
+	if width <= 0 {
+		return []string{""}
+	}
+	if visibleLength(s) <= width {
+		return []string{s}
+	}
+	var result []string
+	for visibleLength(s) > width {
+		// Find the rune index where we hit 'width' visible characters
+		visCount := 0
+		inEscape := false
+		runes := []rune(s)
+		cutIdx := len(runes)
+		for i := 0; i < len(runes); i++ {
+			r := runes[i]
+			if r == '\x1b' {
+				inEscape = true
+				continue
+			}
+			if inEscape {
+				if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+					inEscape = false
+				}
+				continue
+			}
+			visCount++
+			if visCount >= width {
+				cutIdx = i + 1
+				break
+			}
+		}
+		result = append(result, string(runes[:cutIdx])+"\x1b[0m")
+		s = "  " + string(runes[cutIdx:])
+	}
+	if len(s) > 0 {
+		result = append(result, s)
+	}
+	return result
 }
 
 func truncateLine(s string, width int) string {
