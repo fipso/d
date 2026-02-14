@@ -423,12 +423,17 @@ func fetchByService() ([]*TreeNode, error) {
 			replicas = fmt.Sprintf("%d/global", running)
 		}
 
+		image := ""
+		if svc.Spec.TaskTemplate.ContainerSpec != nil {
+			image = truncateImage(svc.Spec.TaskTemplate.ContainerSpec.Image)
+		}
+
 		serviceNode := &TreeNode{
 			Name:      svc.Spec.Name,
 			IsParent:  true,
 			ServiceID: svc.ID,
 			Replicas:  replicas,
-			Image:     truncateImage(svc.Spec.TaskTemplate.ContainerSpec.Image),
+			Image:     image,
 		}
 
 		serviceTasks := tasksByService[svc.ID]
@@ -602,18 +607,26 @@ func fetchByNode() ([]*TreeNode, error) {
 			Image:    roleStr,
 		}
 
-		// Sort tasks by service name, slot, then newest first
+		// Filter out tasks whose service no longer exists
 		nodeTasks := tasksByNode[n.ID]
-		sort.Slice(nodeTasks, func(i, j int) bool {
-			svcI := serviceMap[nodeTasks[i].ServiceID]
-			svcJ := serviceMap[nodeTasks[j].ServiceID]
+		var validTasks []swarm.Task
+		for _, task := range nodeTasks {
+			if _, ok := serviceMap[task.ServiceID]; ok {
+				validTasks = append(validTasks, task)
+			}
+		}
+
+		// Sort tasks by service name, slot, then newest first
+		sort.Slice(validTasks, func(i, j int) bool {
+			svcI := serviceMap[validTasks[i].ServiceID]
+			svcJ := serviceMap[validTasks[j].ServiceID]
 			if svcI.Spec.Name != svcJ.Spec.Name {
 				return svcI.Spec.Name < svcJ.Spec.Name
 			}
-			if nodeTasks[i].Slot != nodeTasks[j].Slot {
-				return nodeTasks[i].Slot < nodeTasks[j].Slot
+			if validTasks[i].Slot != validTasks[j].Slot {
+				return validTasks[i].Slot < validTasks[j].Slot
 			}
-			return nodeTasks[i].CreatedAt.After(nodeTasks[j].CreatedAt)
+			return validTasks[i].CreatedAt.After(validTasks[j].CreatedAt)
 		})
 
 		// Filter: show only running task OR most recent task per service+slot
@@ -623,7 +636,7 @@ func fetchByNode() ([]*TreeNode, error) {
 		}
 		seenSlots := make(map[slotKey]bool)
 
-		for _, task := range nodeTasks {
+		for _, task := range validTasks {
 			key := slotKey{task.ServiceID, int(task.Slot)}
 			if seenSlots[key] {
 				continue // Already have a task for this slot
@@ -634,6 +647,11 @@ func fetchByNode() ([]*TreeNode, error) {
 			containerID := ""
 			if task.Status.ContainerStatus != nil {
 				containerID = task.Status.ContainerStatus.ContainerID
+			}
+
+			image := ""
+			if svc.Spec.TaskTemplate.ContainerSpec != nil {
+				image = truncateImage(svc.Spec.TaskTemplate.ContainerSpec.Image)
 			}
 
 			taskNode := &TreeNode{
@@ -648,7 +666,7 @@ func fetchByNode() ([]*TreeNode, error) {
 				Slot:        int(task.Slot),
 				NodeID:      task.NodeID,
 				NodeName:    ni.Hostname,
-				Image:       truncateImage(svc.Spec.TaskTemplate.ContainerSpec.Image),
+				Image:       image,
 			}
 			swarmNode.Children = append(swarmNode.Children, taskNode)
 		}
