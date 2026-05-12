@@ -88,6 +88,14 @@ type Model struct {
 	// Line wrapping in logs panel
 	lineWrap bool
 
+	// Fullscreen inspect mode
+	fullscreenInspect bool
+	inspectLoading    bool
+	inspectLines      []string
+	inspectOffset     int
+	inspectTaskID     string
+	inspectLastKey    string
+
 	// Auto-refresh
 	autoRefresh     bool
 	lastLogTime     time.Time // Track last log timestamp for incremental fetching
@@ -121,6 +129,12 @@ type logsLoadedMsg struct {
 }
 
 type logsAppendedMsg struct {
+	taskID string
+	lines  []string
+	err    error
+}
+
+type inspectLoadedMsg struct {
 	taskID string
 	lines  []string
 	err    error
@@ -229,6 +243,7 @@ KEYBINDINGS:
     G             Jump to bottom
     yy            Copy all logs to clipboard (wl-copy)
     Enter         Fullscreen logs (j/k:scroll gg/G:jump q/esc:exit)
+    I             Inspect container (hierarchical JSON view, q/esc/I:exit)
     n             Toggle between services/nodes view
     a             Toggle auto-refresh (data:2s, logs:1s, fullscreen logs:500ms)
     r             Refresh
@@ -781,6 +796,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case inspectLoadedMsg:
+		if msg.taskID == m.inspectTaskID {
+			m.inspectLoading = false
+			if msg.err != nil {
+				m.inspectLines = []string{errorStyle.Render("Error: " + msg.err.Error())}
+			} else {
+				m.inspectLines = msg.lines
+			}
+			m.inspectOffset = 0
+		}
+		return m, nil
+
 	case logsAppendedMsg:
 		// Append new logs if this is for the currently selected task
 		if msg.taskID == m.lastSelectedID {
@@ -834,6 +861,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 
 	case tea.KeyMsg:
+		// Handle fullscreen inspect mode
+		if m.fullscreenInspect {
+			return m.handleFullscreenInspectKey(msg)
+		}
 		// Handle fullscreen logs mode
 		if m.fullscreenLogs {
 			return m.handleFullscreenLogsKey(msg)
@@ -926,6 +957,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.lastKey = ""
 			m.lineWrap = !m.lineWrap
 			return m, nil
+
+		case "I":
+			m.lastKey = ""
+			if m.cursor >= len(m.flatList) {
+				return m, nil
+			}
+			node := m.flatList[m.cursor].node
+			if node == nil || node.IsParent || node.ContainerID == "" {
+				return m, nil
+			}
+			m.fullscreenInspect = true
+			m.inspectLoading = true
+			m.inspectLines = nil
+			m.inspectOffset = 0
+			m.inspectTaskID = node.TaskID
+			return m, m.loadInspect(node)
 
 		case "y":
 			if m.lastKey == "y" {
@@ -1026,6 +1073,78 @@ func (m Model) handleFullscreenLogsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	m.logsLastKey = ""
+	return m, nil
+}
+
+func (m Model) handleFullscreenInspectKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	visibleLines := m.height - 3
+	if visibleLines < 1 {
+		visibleLines = 1
+	}
+
+	switch msg.String() {
+	case "q", "esc", "I":
+		m.fullscreenInspect = false
+		m.inspectLastKey = ""
+		return m, nil
+
+	case "ctrl+c":
+		return m, tea.Quit
+
+	case "up", "k":
+		m.inspectLastKey = ""
+		if m.inspectOffset > 0 {
+			m.inspectOffset--
+		}
+		return m, nil
+
+	case "down", "j":
+		m.inspectLastKey = ""
+		maxOffset := len(m.inspectLines) - visibleLines
+		if maxOffset < 0 {
+			maxOffset = 0
+		}
+		if m.inspectOffset < maxOffset {
+			m.inspectOffset++
+		}
+		return m, nil
+
+	case "g":
+		if m.inspectLastKey == "g" {
+			m.inspectOffset = 0
+			m.inspectLastKey = ""
+			return m, nil
+		}
+		m.inspectLastKey = "g"
+		return m, nil
+
+	case "G":
+		m.inspectLastKey = ""
+		maxOffset := len(m.inspectLines) - visibleLines
+		if maxOffset < 0 {
+			maxOffset = 0
+		}
+		m.inspectOffset = maxOffset
+		return m, nil
+
+	case "W":
+		m.inspectLastKey = ""
+		m.lineWrap = !m.lineWrap
+		return m, nil
+
+	case "y":
+		if m.inspectLastKey == "y" {
+			m.inspectLastKey = ""
+			if len(m.inspectLines) > 0 {
+				copyToClipboard(strings.Join(m.inspectLines, "\n"))
+			}
+			return m, nil
+		}
+		m.inspectLastKey = "y"
+		return m, nil
+	}
+
+	m.inspectLastKey = ""
 	return m, nil
 }
 
@@ -1308,6 +1427,170 @@ func (m Model) loadLogsIncremental() tea.Cmd {
 	}
 }
 
+func (m Model) loadInspect(node *TreeNode) tea.Cmd {
+	taskID := node.TaskID
+	containerID := node.ContainerID
+	return func() tea.Msg {
+		ctx := context.Background()
+
+		cli, err := newDockerClient()
+		if err != nil {
+			return inspectLoadedMsg{taskID: taskID, err: err}
+		}
+		defer cli.Close()
+
+		inspect, err := cli.ContainerInspect(ctx, containerID)
+		if err != nil {
+			return inspectLoadedMsg{taskID: taskID, err: err}
+		}
+
+		raw, err := json.Marshal(inspect)
+		if err != nil {
+			return inspectLoadedMsg{taskID: taskID, err: err}
+		}
+		var tree map[string]interface{}
+		if err := json.Unmarshal(raw, &tree); err != nil {
+			return inspectLoadedMsg{taskID: taskID, err: err}
+		}
+
+		return inspectLoadedMsg{taskID: taskID, lines: renderInspectTree(tree)}
+	}
+}
+
+var (
+	inspectKeyStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("12")).Bold(true)
+	inspectMarkerStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	inspectNullStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Italic(true)
+	inspectBoolStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
+	inspectNumStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("13"))
+)
+
+func renderInspectTree(v interface{}) []string {
+	var out []string
+	if m, ok := v.(map[string]interface{}); ok {
+		keys := sortedKeys(m)
+		for _, k := range keys {
+			renderInspectField(&out, "", k, m[k])
+		}
+	} else {
+		renderInspectField(&out, "", "", v)
+	}
+	return out
+}
+
+func sortedKeys(m map[string]interface{}) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func renderInspectField(out *[]string, indent, key string, v interface{}) {
+	switch val := v.(type) {
+	case map[string]interface{}:
+		if len(val) == 0 {
+			*out = append(*out, fmt.Sprintf("%s%s %s",
+				indent,
+				inspectKeyStyle.Render(key+":"),
+				inspectMarkerStyle.Render("{}")))
+			return
+		}
+		*out = append(*out, fmt.Sprintf("%s%s %s",
+			indent,
+			inspectMarkerStyle.Render("▼"),
+			inspectKeyStyle.Render(key)))
+		childIndent := indent + "  "
+		for _, k := range sortedKeys(val) {
+			renderInspectField(out, childIndent, k, val[k])
+		}
+
+	case []interface{}:
+		if len(val) == 0 {
+			*out = append(*out, fmt.Sprintf("%s%s %s",
+				indent,
+				inspectKeyStyle.Render(key+":"),
+				inspectMarkerStyle.Render("[]")))
+			return
+		}
+		*out = append(*out, fmt.Sprintf("%s%s",
+			indent,
+			inspectKeyStyle.Render(key)))
+		itemIndent := indent + "  "
+		for i, item := range val {
+			renderInspectArrayItem(out, itemIndent, i, item)
+		}
+
+	default:
+		*out = append(*out, fmt.Sprintf("%s%s %s",
+			indent,
+			inspectKeyStyle.Render(key+":"),
+			formatInspectScalar(v)))
+	}
+}
+
+func renderInspectArrayItem(out *[]string, indent string, idx int, v interface{}) {
+	switch val := v.(type) {
+	case map[string]interface{}:
+		if len(val) == 0 {
+			*out = append(*out, fmt.Sprintf("%s%s %s",
+				indent,
+				inspectMarkerStyle.Render("-"),
+				inspectMarkerStyle.Render("{}")))
+			return
+		}
+		*out = append(*out, fmt.Sprintf("%s%s %s",
+			indent,
+			inspectMarkerStyle.Render("▼"),
+			inspectKeyStyle.Render(fmt.Sprintf("[%d]", idx))))
+		childIndent := indent + "  "
+		for _, k := range sortedKeys(val) {
+			renderInspectField(out, childIndent, k, val[k])
+		}
+	case []interface{}:
+		// Nested array; render header then recurse items
+		*out = append(*out, fmt.Sprintf("%s%s %s",
+			indent,
+			inspectMarkerStyle.Render("-"),
+			inspectKeyStyle.Render(fmt.Sprintf("[%d]", idx))))
+		itemIndent := indent + "  "
+		for i, item := range val {
+			renderInspectArrayItem(out, itemIndent, i, item)
+		}
+	default:
+		*out = append(*out, fmt.Sprintf("%s%s %s",
+			indent,
+			inspectMarkerStyle.Render("-"),
+			formatInspectScalar(v)))
+	}
+}
+
+func formatInspectScalar(v interface{}) string {
+	switch val := v.(type) {
+	case nil:
+		return inspectNullStyle.Render("null")
+	case bool:
+		if val {
+			return inspectBoolStyle.Render("true")
+		}
+		return inspectBoolStyle.Render("false")
+	case float64:
+		// JSON numbers come back as float64; print as integer when possible
+		if val == float64(int64(val)) {
+			return inspectNumStyle.Render(fmt.Sprintf("%d", int64(val)))
+		}
+		return inspectNumStyle.Render(fmt.Sprintf("%g", val))
+	case string:
+		if val == "" {
+			return inspectNullStyle.Render(`""`)
+		}
+		return val
+	default:
+		return fmt.Sprintf("%v", val)
+	}
+}
+
 func (m Model) View() string {
 	if m.loading {
 		return "Loading...\n"
@@ -1319,6 +1602,11 @@ func (m Model) View() string {
 
 	if len(m.nodes) == 0 {
 		return "No data found.\n\nPress 'q' to quit, 'r' to refresh.\n"
+	}
+
+	// Fullscreen inspect view
+	if m.fullscreenInspect {
+		return m.renderFullscreenInspect()
 	}
 
 	// Fullscreen logs view
@@ -1358,7 +1646,7 @@ func (m Model) View() string {
 		autoRefreshIndicator = " [AUTO]"
 	}
 	leftLines = append(leftLines, dimStyle.Render(title+scrollInfo+autoRefreshIndicator))
-	leftLines = append(leftLines, dimStyle.Render("j/k:nav gg/G:jump yy:copy enter:logs n:mode a:auto W:wrap r:refresh q:quit"))
+	leftLines = append(leftLines, dimStyle.Render("j/k:nav gg/G:jump yy:copy enter:logs I:inspect n:mode a:auto W:wrap r:refresh q:quit"))
 
 	start := m.offset
 	if start < 0 {
@@ -1499,6 +1787,69 @@ func (m Model) renderFullscreenLogs() string {
 	}
 
 	// Build output
+	var output strings.Builder
+	numLines := m.height
+	if numLines > 0 {
+		numLines--
+	}
+
+	for i := 0; i < numLines; i++ {
+		if i < len(lines) {
+			output.WriteString(lines[i])
+		}
+		if i < numLines-1 {
+			output.WriteString("\n")
+		}
+	}
+
+	return output.String()
+}
+
+func (m Model) renderFullscreenInspect() string {
+	visibleLines := m.height - 3
+	if visibleLines < 1 {
+		visibleLines = 1
+	}
+
+	var lines []string
+
+	selectedName := ""
+	if m.cursor < len(m.flatList) && m.flatList[m.cursor].node != nil {
+		selectedName = m.flatList[m.cursor].node.Name
+	}
+
+	header := "Inspect: " + selectedName
+	if m.inspectLoading {
+		header += " (loading...)"
+	} else if len(m.inspectLines) > 0 {
+		header += fmt.Sprintf(" [%d/%d]", m.inspectOffset+1, len(m.inspectLines))
+	}
+	lines = append(lines, dimStyle.Render(header))
+	lines = append(lines, dimStyle.Render("j/k:scroll gg/G:jump yy:copy W:wrap q/esc/I:exit"))
+
+	if m.inspectLoading {
+		lines = append(lines, dimStyle.Render("Loading container inspect..."))
+	} else {
+		start := m.inspectOffset
+		if start < 0 {
+			start = 0
+		}
+		end := start + visibleLines
+		if end > len(m.inspectLines) {
+			end = len(m.inspectLines)
+		}
+		for i := start; i < end; i++ {
+			line := m.inspectLines[i]
+			if m.lineWrap {
+				wrapped := wrapLine(line, m.width-1)
+				lines = append(lines, wrapped...)
+			} else {
+				line = truncateLine(line, m.width-1)
+				lines = append(lines, line)
+			}
+		}
+	}
+
 	var output strings.Builder
 	numLines := m.height
 	if numLines > 0 {
